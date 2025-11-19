@@ -1,6 +1,7 @@
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, time as dtime
+from zoneinfo import ZoneInfo  # 用于时区处理（美东时间）
 
 import yfinance as yf
 from telegram import Update, BotCommand
@@ -12,6 +13,7 @@ from telegram.ext import (
     filters,
 )
 
+
 # ========= 配置 =========
 BOT_TOKEN = "8543904501:AAGmptuQNpejBS4Y-rE6lkQPTS9f80qbU7I"   # ← 换成你的 Token
 DB_PATH = "watchlist.db"            # 数据库文件
@@ -19,8 +21,11 @@ MOVE_THRESHOLD = 3.0                # 全局默认盘中异动阈值（百分比
 LAST_PRICES: dict[str, float] = {}  # 用于盘中异动判断
 
 # 管理员的 Telegram ID（可以有多个）
-# TODO: 把 123456789 换成你自己的 ID（整数）
+# TODO: 把 123456789 换成你自己的 ID（整数），比如 {111111111, 222222222}
 ADMIN_IDS = {6222317546}
+
+# 美东时区（Render 是 UTC，我们用 tzinfo=ET 来确保按美东 16:05 触发）
+ET_TZ = ZoneInfo("America/New_York")
 # ========================
 
 
@@ -93,7 +98,7 @@ def remove_watch(user_id: int, symbol: str) -> int:
     cur.execute(
         "UPDATE watchlist SET active = 0 "
         "WHERE user_id = ? AND symbol = ? AND active = 1",
-        (user_id, symbol.upper()),
+        (user_id, symbol.upper(),),
     )
     DB_CONN.commit()
     return cur.rowcount
@@ -141,6 +146,15 @@ def revoke_user(user_id: int):
         (user_id,),
     )
     DB_CONN.commit()
+
+
+def get_all_authorized_users():
+    """返回所有已授权用户列表（管理员查看用）"""
+    cur = DB_CONN.cursor()
+    cur.execute(
+        "SELECT user_id, created_at FROM authorized_users ORDER BY created_at ASC"
+    )
+    return cur.fetchall()
 
 
 # ========= 行情获取 =========
@@ -331,7 +345,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ========= 管理员命令：授权 / 收回 =========
+# ========= 管理员命令：授权 / 收回 / 查看名单 =========
 async def allow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caller_id = update.effective_user.id
     if not is_admin(caller_id):
@@ -372,6 +386,27 @@ async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     revoke_user(target_id)
     await update.message.reply_text(f"✅ 已收回用户 {target_id} 的使用权限。")
+
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员查看所有已授权用户名单"""
+    caller_id = update.effective_user.id
+    if not is_admin(caller_id):
+        await update.message.reply_text("❌ 你不是管理员，不能查看授权用户名单。")
+        return
+
+    rows = get_all_authorized_users()
+    if not rows:
+        await update.message.reply_text("当前没有任何已授权用户。")
+        return
+
+    lines = ["📜 已授权用户列表："]
+    for r in rows:
+        uid = r["user_id"]
+        created = r["created_at"]
+        lines.append(f"- ID: {uid}  （授权时间：{created}）")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 # ========= 定时任务：盘中每分钟检查 =========
@@ -433,7 +468,7 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 
-# ========= 定时任务：每日收盘总结（本地时间 16:05） =========
+# ========= 定时任务：每日收盘总结（美东时间 16:05） =========
 async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     rows = get_all_active_watches()
     if not rows:
@@ -444,12 +479,14 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     for r in rows:
         user_map[r["user_id"]].append(r)
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    # 使用美东时间的日期
+    now_et = datetime.now(ET_TZ)
+    today_str = now_et.strftime("%Y-%m-%d")
 
     for user_id, stocks in user_map.items():
         lines: list[str] = []
         lines.append("【今日监控总结 | 内部版】")
-        lines.append(f"日期：{today_str}（本地时间）")
+        lines.append(f"日期：{today_str}（美东时间）")
         lines.append(f"监控股票数量：{len(stocks)}")
         lines.append("")
         lines.append("个股明细：")
@@ -500,6 +537,7 @@ async def post_init(app):
         BotCommand("setmove", "设置盘中异动阈值"),
         BotCommand("allow", "【管理员】授权某个 Telegram ID"),
         BotCommand("revoke", "【管理员】收回某个 Telegram ID 权限"),
+        BotCommand("users", "【管理员】查看授权用户列表"),
     ]
     await app.bot.set_my_commands(commands)
 
@@ -524,19 +562,20 @@ def main():
     app.add_handler(CommandHandler("setmove", set_move))
     app.add_handler(CommandHandler("allow", allow_cmd))
     app.add_handler(CommandHandler("revoke", revoke_cmd))
+    app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
     # 定时任务：盘中每 60 秒检查一次（24 小时监控）
     job_queue = app.job_queue
     job_queue.run_repeating(check_prices, interval=60, first=10)
 
-    # 每天本地时间 16:05 推送收盘总结
+    # 每天“美东时间 16:05”推送收盘总结（Render 是 UTC，也没问题）
     job_queue.run_daily(
         send_daily_summary,
-        time=dtime(hour=16, minute=5),
+        time=dtime(hour=16, minute=5, tzinfo=ET_TZ),
     )
 
-    print("机器人已启动（SQLite + 权限控制版），正在监控股票并计划每日收盘总结...")
+    print("机器人已启动（SQLite + 权限控制版），正在监控股票并计划每日收盘总结（美东 16:05）...")
     app.run_polling()
 
 
