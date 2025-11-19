@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 # ========= 配置 =========
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"   # ← 换成你自己的最新 Token
+BOT_TOKEN = "8543904501:AAGmptuQNpejBS4Y-rE6lkQPTS9f80qbU7I"   # ← 换成你自己的最新 Token
 DB_PATH = "watchlist.db"            # SQLite 数据库文件
 MOVE_THRESHOLD = 3.0                # 全局默认盘中异动阈值（百分比）
 LAST_PRICES = {}                    # 用于盘中异动判断（内存字典）
@@ -409,3 +409,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
