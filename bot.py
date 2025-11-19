@@ -3,6 +3,8 @@ from collections import defaultdict
 from datetime import datetime, time as dtime
 
 import yfinance as yf
+from zoneinfo import ZoneInfo  # 用来指定美东时区
+
 from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
@@ -13,10 +15,11 @@ from telegram.ext import (
 )
 
 # ========= 配置 =========
-BOT_TOKEN = "8543904501:AAGmptuQNpejBS4Y-rE6lkQPTS9f80qbU7I"   # ← 换成你的 Token
-DB_PATH = "watchlist.db"        # 新数据库文件
-MOVE_THRESHOLD = 3.0            # 全局默认盘中异动阈值（百分比）
-LAST_PRICES: dict[str, float] = {}  # 用于盘中异动判断
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"   # ← 换成你自己的最新 Token
+DB_PATH = "watchlist.db"            # SQLite 数据库文件
+MOVE_THRESHOLD = 3.0                # 全局默认盘中异动阈值（百分比）
+LAST_PRICES = {}                    # 用于盘中异动判断（内存字典）
+ET_TZ = ZoneInfo("America/New_York")  # 美东时区
 # ========================
 
 
@@ -50,7 +53,7 @@ def init_db():
 
 
 def add_watch(user_id: int, symbol: str, tp: float, sl: float):
-    cur = DB_CONN.cursor    ()
+    cur = DB_CONN.cursor()
     cur.execute(
         "INSERT INTO watchlist (user_id, symbol, tp, sl, active) "
         "VALUES (?, ?, ?, ?, 1)",
@@ -138,14 +141,14 @@ def get_daily_snapshot(symbol: str):
 # ========= 机器人命令 =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📈 股票监控机器人（SQLite 专业版）\n\n"
+        "📈 股票监控机器人（SQLite 专业版 | 24 小时监控）\n\n"
         "常用命令：\n"
         "/add AAPL 185 160  → 添加监控（代码、止盈、止损）\n"
         "/list              → 查看当前监控列表\n"
         "/remove AAPL       → 删除某只股票的监控\n"
         "/setmove 3         → 设置盘中异动阈值为 3%\n\n"
         "系统功能：\n"
-        "· 每分钟检查价格，触发止盈 / 止损 / 盘中异动提醒\n"
+        "· 每分钟检查价格，触发止盈 / 止损 / 盘中异动提醒（24 小时）\n"
         "· 每天美东 16:05 自动推送「今日监控总结」"
     )
 
@@ -243,15 +246,14 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ========= 定时任务：盘中每分钟检查 =========
+# ========= 定时任务：盘中每分钟检查（24 小时） =========
 async def check_prices(context: ContextTypes.DEFAULT_TYPE):
     rows = get_all_active_watches()
     if not rows:
         return
 
-    # 按 symbol 去重，减少请求次数
     symbols = sorted({r["symbol"] for r in rows})
-    prices: dict[str, float] = {}
+    prices = {}
 
     for sym in symbols:
         price = get_price(sym)
@@ -268,7 +270,7 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
         if price is None:
             continue
 
-        messages: list[str] = []
+        messages = []
 
         # ① 止盈 / 止损
         if price >= tp:
@@ -309,19 +311,20 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 按用户分组
-    user_map: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    user_map = defaultdict(list)
     for r in rows:
         user_map[r["user_id"]].append(r)
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    # 用美东时间的“今天”
+    now_et = datetime.now(ET_TZ)
+    today_str = now_et.strftime("%Y-%m-%d")
 
     for user_id, stocks in user_map.items():
-        lines: list[str] = []
+        lines = []
         lines.append("【今日监控总结 | 内部版】")
         lines.append(f"日期：{today_str}（美东）")
         lines.append(f"监控股票数量：{len(stocks)}")
         lines.append("")
-
         lines.append("个股明细：")
 
         idx = 1
@@ -390,17 +393,17 @@ def main():
     app.add_handler(CommandHandler("setmove", set_move))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-    # 定时任务：盘中每 60 秒检查一次
+    # 定时任务：每 60 秒检查一次（24 小时）
     job_queue = app.job_queue
     job_queue.run_repeating(check_prices, interval=60, first=10)
 
-    # 每天美东时间 16:05 推送收盘总结（电脑本地时间就是美东）
+    # 每天“美东时间 16:05”推送收盘总结
     job_queue.run_daily(
         send_daily_summary,
-        time=dtime(hour=16, minute=5),
+        time=dtime(hour=16, minute=5, tzinfo=ET_TZ),
     )
 
-    print("机器人已启动（SQLite 版），正在监控股票并计划每日收盘总结...")
+    print("机器人已启动（SQLite 版），24 小时监控 + 美东 16:05 收盘总结...")
     app.run_polling()
 
 
