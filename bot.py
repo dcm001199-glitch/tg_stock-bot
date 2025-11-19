@@ -1,3 +1,7 @@
+import os
+import threading
+import http.server
+import socketserver
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, time as dtime
@@ -21,7 +25,7 @@ MOVE_THRESHOLD = 3.0                # 全局默认盘中异动阈值（百分比
 LAST_PRICES: dict[str, float] = {}  # 用于盘中异动判断
 
 # 管理员的 Telegram ID（可以有多个）
-# TODO: 把 123456789 换成你自己的 ID（整数），比如 {111111111, 222222222}
+# TODO: 把 6222317546 换成你真正的管理员 ID 集合，比如 {111111111, 222222222}
 ADMIN_IDS = {6222317546}
 
 # 美东时区（Render 是 UTC，我们用 tzinfo=ET 来确保按美东 16:05 触发）
@@ -542,6 +546,26 @@ async def post_init(app):
     await app.bot.set_my_commands(commands)
 
 
+# ========= 简单 HTTP 服务器（让 Render 免费 Web Service 看到开放端口） =========
+class SimpleHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        # 不在日志里刷 HTTP 访问记录，避免太吵
+        return
+
+
+def start_http_server():
+    port = int(os.environ.get("PORT", "10000"))
+    with socketserver.TCPServer(("", port), SimpleHandler) as httpd:
+        print(f"HTTP health server started on port {port}")
+        httpd.serve_forever()
+
+
 # ========= 主程序 =========
 def main():
     init_db()
@@ -574,6 +598,10 @@ def main():
         send_daily_summary,
         time=dtime(hour=16, minute=5, tzinfo=ET_TZ),
     )
+
+    # ---------- 启动 HTTP 服务器（后台线程） ----------
+    thread = threading.Thread(target=start_http_server, daemon=True)
+    thread.start()
 
     print("机器人已启动（SQLite + 权限控制版），正在监控股票并计划每日收盘总结（美东 16:05）...")
     app.run_polling()
