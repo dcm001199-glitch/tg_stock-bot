@@ -1,0 +1,4 @@
+python-telegram-bot[job-queue]
+yfinance
+apscheduler
+sqlite3-binary
